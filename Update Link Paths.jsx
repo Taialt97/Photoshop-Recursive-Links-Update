@@ -294,6 +294,12 @@ function findFirstLinkedInfo() {
     return null;
 }
 
+// One-shot Photoshop event that collapses every group in the active doc.
+// Source: https://stackoverflow.com/a/59707640 (Vlad Moyseenko, CC BY-SA 4.0)
+function collapseAllGroups() {
+    safeAMAction(s2t("collapseAllGroupsEvent"), new ActionDescriptor(), DialogModes.NO);
+}
+
 function doRelink() {
     activateRootDocument();
     processCurrentDocument(0, false);
@@ -327,6 +333,12 @@ function main() {
 
     activateRootDocument();
     app.activeDocument.suspendHistory("Update Link Paths (Recursive)", "doRelink()");
+
+    // Run the collapse as a separate top-level operation, AFTER suspendHistory
+    // returns. Inside suspendHistory the collapseAllGroupsEvent is silently
+    // ignored; here it behaves exactly like the standalone test script.
+    activateRootDocument();
+    collapseAllGroups();
 
     dbg("done. count=" + gRelinkCount);
     alert("Relinked " + gRelinkCount + " layer(s) (all depths) to:\n" + gNewFolderPath +
