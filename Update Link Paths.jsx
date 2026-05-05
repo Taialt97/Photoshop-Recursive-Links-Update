@@ -11,12 +11,16 @@
 //   [IGNORE]  Skip this layer or group entirely (and everything inside it).
 //   [UPDATE]  On an embedded smart object: force-open it, relink anything
 //             inside, save it back. (Embedded SOs are otherwise skipped.)
+//   [ALL]     On a group or smart object: force-recurse through every smart
+//             object inside (linked and embedded), at every nesting depth,
+//             including nested smart-object contents. [IGNORE] still wins.
 
 #target photoshop
 
 var MAX_DEPTH = 8;
 var IGNORE_RE = /\[ignore\]/i;
 var UPDATE_RE = /\[update\]/i;
+var ALL_RE = /\[all\]/i;
 
 var gNewFolderPath = null;
 var gRelinkCount = 0;
@@ -169,9 +173,9 @@ function filenameFromPath(p) {
 // layer in the active document at any nesting depth in groups, as
 // { id, name, forceUpdate }. Layers/groups whose name contains [IGNORE]
 // (case-insensitive) are skipped along with their entire subtree.
-function collectAllSmartObjects() {
+function collectAllSmartObjects(inheritedAll) {
     var out = [];
-    function walk(container) {
+    function walk(container, inheritedFromAncestors) {
         var layers;
         try { layers = container.layers; } catch (e) { return; }
         if (!layers) return;
@@ -182,14 +186,21 @@ function collectAllSmartObjects() {
                 try { name = L.name || ""; } catch (en) {}
                 if (IGNORE_RE.test(name)) { dbg("  [IGNORE] " + name); continue; }
                 if (L.typename === "LayerSet") {
-                    walk(L);
+                    var childInherited = inheritedFromAncestors || ALL_RE.test(name);
+                    walk(L, childInherited);
                 } else if (L.typename === "ArtLayer" && L.kind === LayerKind.SMARTOBJECT) {
-                    out.push({ id: L.id, name: name, forceUpdate: UPDATE_RE.test(name) });
+                    var thisAll = inheritedFromAncestors || ALL_RE.test(name);
+                    out.push({
+                        id: L.id,
+                        name: name,
+                        forceUpdate: UPDATE_RE.test(name),
+                        effectiveAll: thisAll
+                    });
                 }
             } catch (e) {}
         }
     }
-    walk(app.activeDocument);
+    walk(app.activeDocument, !!inheritedAll);
     return out;
 }
 
@@ -211,11 +222,12 @@ function describeLayerTree(container, indent) {
     }
 }
 
-function processCurrentDocument(depth) {
+function processCurrentDocument(depth, inheritedAll) {
     if (depth >= MAX_DEPTH) { dbg("depth cap hit at " + depth); return; }
     var thisDoc = app.activeDocument;
-    var sos = collectAllSmartObjects();
-    dbg("depth=" + depth + " doc=" + thisDoc.name + " smartObjects=" + sos.length);
+    var sos = collectAllSmartObjects(inheritedAll);
+    dbg("depth=" + depth + " doc=" + thisDoc.name +
+        " smartObjects=" + sos.length + " inheritedAll=" + !!inheritedAll);
     if (sos.length === 0 && depth > 0) {
         dbg("  layer tree (debug — no SOs found):");
         describeLayerTree(thisDoc, "    ");
@@ -225,12 +237,14 @@ function processCurrentDocument(depth) {
         try { app.activeDocument = thisDoc; } catch (eAct) { dbg("  reactivate failed: " + eAct); return; }
         if (!amSelectLayerById(so.id)) { dbg("  select failed id=" + so.id); continue; }
         var info = getLinkedFileInfo();
+        var childAll = so.effectiveAll;
 
         if (info) {
             // Linked SO: relink at this level, then descend into its contents if it opens.
             var newPath = gNewFolderPath + "/" + info.filename;
             var oldStr = info.broken ? "(broken — " + info.filename + ")" : info.fullPath;
-            dbg("  relink id=" + so.id + " \"" + so.name + "\" " + oldStr + " -> " + newPath);
+            dbg("  relink id=" + so.id + " \"" + so.name + "\" " + oldStr + " -> " + newPath +
+                (childAll ? " [ALL]" : ""));
             try {
                 relinkActiveLayer(newPath);
                 gRelinkCount++;
@@ -242,28 +256,28 @@ function processCurrentDocument(depth) {
             if (!amEditContents()) { dbg("  editContents failed"); continue; }
             if (app.documents.length > prevCount) {
                 dbg("  descended into " + app.activeDocument.name);
-                processCurrentDocument(depth + 1);
+                processCurrentDocument(depth + 1, childAll);
                 amCloseWithSave();
                 try { app.activeDocument = thisDoc; } catch (eR) {}
             } else {
                 dbg("  no nested doc opened");
             }
-        } else if (so.forceUpdate) {
-            // Embedded (or otherwise non-linked) SO marked [UPDATE]:
-            // open contents, recurse to fix inner links, save back into the parent.
-            dbg("  [UPDATE] forcing open on non-linked id=" + so.id + " \"" + so.name + "\"");
+        } else if (so.forceUpdate || so.effectiveAll) {
+            // Embedded SO: open if it has [UPDATE], or is inside an [ALL] scope.
+            var reason = so.effectiveAll ? "[ALL]" : "[UPDATE]";
+            dbg("  " + reason + " forcing open on non-linked id=" + so.id + " \"" + so.name + "\"");
             var prevCount2 = app.documents.length;
             if (!amEditContents()) { dbg("  editContents failed (forced)"); continue; }
             if (app.documents.length > prevCount2) {
                 dbg("  descended (forced) into " + app.activeDocument.name);
-                processCurrentDocument(depth + 1);
+                processCurrentDocument(depth + 1, childAll);
                 amCloseWithSave();
                 try { app.activeDocument = thisDoc; } catch (eR2) {}
             } else {
-                dbg("  [UPDATE] could not open contents as a doc");
+                dbg("  " + reason + " could not open contents as a doc");
             }
         } else {
-            dbg("  skip (not linked, no [UPDATE]) id=" + so.id + " \"" + so.name + "\"");
+            dbg("  skip (not linked, no [UPDATE]/[ALL]) id=" + so.id + " \"" + so.name + "\"");
         }
     }
 }
@@ -271,7 +285,7 @@ function processCurrentDocument(depth) {
 // Walks the active doc (groups too, honoring [IGNORE]) and returns info on
 // the first linked SO it finds, or null.
 function findFirstLinkedInfo() {
-    var sos = collectAllSmartObjects();
+    var sos = collectAllSmartObjects(false);
     for (var i = 0; i < sos.length; i++) {
         if (!amSelectLayerById(sos[i].id)) continue;
         var info = getLinkedFileInfo();
@@ -282,7 +296,7 @@ function findFirstLinkedInfo() {
 
 function doRelink() {
     activateRootDocument();
-    processCurrentDocument(0);
+    processCurrentDocument(0, false);
 }
 
 function main() {
