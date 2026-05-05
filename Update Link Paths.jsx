@@ -326,7 +326,13 @@ function main() {
         : "Current linked path:\n\n" + firstInfo.fullPath;
     alert(firstMsg);
 
-    var newFolder = Folder.selectDialog("Select the new links folder");
+    // Open the folder picker at the active PSD's location when possible.
+    // Folder.selectDialog has no startup-folder arg, but Folder#selectDlg does.
+    var startFolder = null;
+    try { startFolder = app.activeDocument.path; } catch (eP) {}
+    var newFolder = startFolder
+        ? startFolder.selectDlg("Select the new links folder")
+        : Folder.selectDialog("Select the new links folder");
     if (!newFolder) return;
     gNewFolderPath = newFolder.fsName;
     gRelinkCount = 0;
